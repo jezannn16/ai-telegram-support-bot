@@ -101,9 +101,10 @@ The CLI stores a reply locally and does not notify the customer. Telegram `/repl
 ## Development
 
 ```sh
+.venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m unittest discover -v
 .venv/bin/python app.py --db /tmp/support-eval.sqlite3 eval --report /tmp/support-evaluation.json
-ruff check .
+.venv/bin/ruff check .
 ```
 
 CI runs the tests, synthetic evaluation command, and Ruff on Python 3.11 and 3.13 without Telegram credentials. A separate opt-in `getMe` probe checks a real token without sending messages or consuming updates.
