@@ -1,9 +1,8 @@
 """Telegram customer and operator workflows with persisted, scoped ticket access."""
 from __future__ import annotations
-import json,os
-from datetime import datetime,timezone
+import json
 from telegram_runtime import start
-from app import MAX_TEXT,create_ticket,now,operator,require_operator,retrieve
+from app import MAX_TEXT,create_ticket,now,operator,retrieve
 
 def _event(db,actor,event,ticket_id,details=''):
  db.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(actor,event,ticket_id,now()))

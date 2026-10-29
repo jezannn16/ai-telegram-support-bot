@@ -3,6 +3,12 @@ from unittest.mock import patch
 from telegram_api import TelegramAPI, TelegramAPIError
 
 class TelegramAPITests(unittest.TestCase):
+ def test_get_me_checks_token_without_polling_or_sending(self):
+  calls=[]
+  api=TelegramAPI('123:secret',request_fn=lambda method,params,timeout:(calls.append((method,params)) or {'ok':True,'result':{'id':123,'username':'test_bot'}}))
+  self.assertEqual(api.get_me()['username'],'test_bot')
+  self.assertEqual(calls,[('getMe',{})])
+
  def test_rate_limit_retries_once_and_clamps_wait(self):
   responses=iter([{'ok':False,'error_code':429,'parameters':{'retry_after':99}},{'ok':True,'result':[]}])
   calls=[]

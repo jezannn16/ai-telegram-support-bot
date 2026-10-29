@@ -1,6 +1,6 @@
 """Support FAQ/ticket service; live Telegram access is isolated in telegram_bot.py."""
 from __future__ import annotations
-import argparse,json,os,re,shutil,sqlite3,sys,tempfile
+import argparse,json,os,re,sqlite3,tempfile
 from migrations import connect as connect_db
 from datetime import datetime,timezone
 from pathlib import Path

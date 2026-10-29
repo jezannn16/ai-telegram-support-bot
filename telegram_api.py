@@ -32,6 +32,9 @@ class TelegramAPI:
         raise TelegramAPIError('Telegram API rate limit retry exhausted')
     def get_updates(self,offset,timeout=20):
         return self.call('getUpdates',{'offset':offset,'timeout':timeout,'allowed_updates':['message']},timeout=timeout+10) or []
+    def get_me(self):
+        """Validate the configured bot token without reading updates or sending messages."""
+        return self.call('getMe',{})
     def send_message(self,chat_id,text):
         if len(text)>4000:text=text[:3990]+'…'
         return self.call('sendMessage',{'chat_id':chat_id,'text':text},timeout=15)
