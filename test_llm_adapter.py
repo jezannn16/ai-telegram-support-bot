@@ -99,6 +99,38 @@ class LLMAdapterTests(unittest.TestCase):
         stored = json.loads(self.db.execute("SELECT citations FROM tickets").fetchone()[0])
         self.assertEqual(stored[0]["document"], "Synthetic FAQ")
 
+    def test_provider_native_structured_output_refusal_hands_off(self):
+        # OpenAI's documented safety refusal response bypasses the supplied schema
+        # and returns message.refusal with null content.
+        class RefusalTransport:
+            def complete(self, payload):
+                return {"choices": [{"message": {"refusal": "I cannot help with that request.",
+                                                  "content": None}}]}
+
+        result = answer_from_hits("returns allowed days", self.hits, RefusalTransport())
+        self.assertEqual(result.status, "handoff")
+        self.assertEqual(result.answer, "")
+        self.assertEqual(result.source_ids, ())
+
+    def test_llm_payload_excludes_ticket_and_other_customer_history(self):
+        # Retrieval for the current request is published FAQ-only; private ticket
+        # content and conversation state must never be included in the provider payload.
+        self.db.execute("INSERT INTO documents(title,status,content,updated_at) VALUES(?,?,?,?)",
+                        ("Private draft", "draft", "Do not disclose CUSTOMER-OTHER-SECRET", "now"))
+        self.db.execute("INSERT INTO tickets(user_id,question,internal_summary,status,citations,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                        ("other-user", "Private ticket CUSTOMER-OTHER-SECRET", "private internal summary", "open", "[]", "now", "now"))
+        self.db.commit()
+        fake = FakeTransport(json.dumps({"answer": "Returns are allowed within 30 days.",
+                                         "citations": ["S1"], "refuse": False}))
+        with patch("llm_adapter.configured_transport", return_value=fake):
+            handle_update({"message": {"from": {"id": 504}, "chat": {"id": 504, "type": "private"},
+                            "text": "returns allowed days"}}, self.db)
+        wire_payload = json.dumps(fake.payloads, ensure_ascii=False)
+        self.assertIn("returns allowed days", wire_payload)
+        self.assertIn("Returns are allowed within 30 days.", wire_payload)
+        self.assertNotIn("CUSTOMER-OTHER-SECRET", wire_payload)
+        self.assertNotIn("private internal summary", wire_payload)
+
     def test_adapter_failure_falls_back_to_published_evidence(self):
         fake = FakeTransport("not valid json")
         with patch("llm_adapter.configured_transport", return_value=fake):

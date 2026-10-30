@@ -123,7 +123,14 @@ def answer_from_hits(
         return LLMResult("unavailable")
     try:
         choice = response["choices"][0]
-        content = choice["message"]["content"]
+        message = choice["message"]
+        # Structured Outputs refusals intentionally bypass the requested JSON schema.
+        # Treat the provider's documented refusal field as a handoff, never as a
+        # schema failure that would show an automated answer to the customer.
+        refusal = message.get("refusal")
+        if isinstance(refusal, str) and refusal.strip():
+            return LLMResult("handoff")
+        content = message["content"]
         if not isinstance(content, str) or len(content) > 10_000:
             return LLMResult("invalid")
         parsed = json.loads(content)
