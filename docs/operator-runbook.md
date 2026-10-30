@@ -8,11 +8,11 @@
 
 ## Customer data
 
-Customer actions are scoped to the Telegram numeric user ID. `/export` writes the caller's tickets and messages to local JSON; `/delete_me CONFIRM` removes that caller's tickets and cascaded messages. Keep exports private and remove them when no longer needed. Deletion cannot remove messages already delivered through Telegram or copies in external backups.
+Customer actions are scoped to the Telegram numeric user ID. The CLI `export USER FILE` writes tickets, messages, event history, and conversation data to JSON; `/delete_me CONFIRM` removes that caller's tickets, conversation, rate-limit record, queued chat responses, legacy raw update payloads, and cascaded messages. Keep exports private and remove them when no longer needed. Deletion cannot remove messages already delivered through Telegram or copies in external backups. Run `purge-closed --older-than-days N --confirm` periodically to delete old closed tickets while retaining open cases.
 
 ## Delivery and recovery
 
-Incoming update IDs and outgoing messages are stored in SQLite. Delivery follows at-most-once handling. A `failed` or `uncertain` outbox item is not resent automatically because a retry could duplicate a customer message. Check outbox state and ticket messages before manually resolving an uncertain delivery. Use `health --backup <path>` for a SQLite-consistent backup. Restore drills and automated retention are not implemented.
+Incoming update IDs and outgoing messages are stored in SQLite. Delivery follows at-most-once handling. Inspect delivery state with `outbox OPERATOR_ID --operator`. A definite `failed` item can be queued once per operator action with `retry-delivery OPERATOR_ID ID --operator --confirm`; queued work sends on the next bot run. A `sending` item left by a crash becomes `uncertain` and must not be retried until delivery is checked because it may already have reached Telegram. Attempt counts are stored. Use `health --backup <path>` for a SQLite-consistent backup; the test suite runs a local backup/restore round trip.
 
 ## Knowledge quality
 

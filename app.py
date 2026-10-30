@@ -1,8 +1,9 @@
 """Support FAQ/ticket service; live Telegram access is isolated in telegram_bot.py."""
 from __future__ import annotations
 import argparse,json,os,re,sqlite3,tempfile
+import time
 from migrations import connect as connect_db
-from datetime import datetime,timezone
+from datetime import datetime,timedelta,timezone
 from pathlib import Path
 DB=Path(__file__).with_name('support.sqlite3'); MAX_TEXT=4000; MAX_DOC=50000
 def connect(path=DB):
@@ -25,6 +26,48 @@ def load_document(path:Path)->str:
  return content
 
 def now():return datetime.now(timezone.utc).isoformat()
+def allow_request(db,user,now_ts=None,limit=10,window_seconds=60):
+ """Persist a simple per-user Telegram request window; caller owns transaction."""
+ current=time.time() if now_ts is None else now_ts
+ row=db.execute('SELECT window_started_at,request_count FROM user_rate_limits WHERE user_id=?',(user,)).fetchone()
+ if row is None or current-row['window_started_at']>=window_seconds or current<row['window_started_at']:
+  db.execute('INSERT INTO user_rate_limits(user_id,window_started_at,request_count) VALUES(?,?,1) ON CONFLICT(user_id) DO UPDATE SET window_started_at=excluded.window_started_at,request_count=1',(user,current))
+  return True
+ if row['request_count']>=limit:return False
+ db.execute('UPDATE user_rate_limits SET request_count=request_count+1 WHERE user_id=?',(user,))
+ return True
+def requeue_failed_delivery(db,delivery_id):
+ cur=db.execute("UPDATE telegram_outbox SET status='queued' WHERE id=? AND status='failed'",(delivery_id,))
+ db.commit()
+ return cur.rowcount==1
+def purge_closed(db,older_than_days,reference=None):
+ if older_than_days<1 or older_than_days>36500:raise ValueError('Retention period must be between 1 and 36500 days')
+ reference=reference or datetime.now(timezone.utc)
+ cutoff=(reference-timedelta(days=older_than_days)).isoformat()
+ ids=[r[0] for r in db.execute("SELECT id FROM tickets WHERE status='closed' AND updated_at<?",(cutoff,))]
+ db.executemany('DELETE FROM audit WHERE ticket_id=?',[(tid,) for tid in ids])
+ db.executemany('DELETE FROM tickets WHERE id=?',[(tid,) for tid in ids])
+ db.commit()
+ return len(ids)
+def delete_user_data(db,user):
+ ids=[r[0] for r in db.execute('SELECT id FROM tickets WHERE user_id=?',(user,))]
+ db.execute('DELETE FROM audit WHERE actor=?',(user,))
+ db.executemany('DELETE FROM audit WHERE ticket_id=?',[(tid,) for tid in ids])
+ db.executemany('DELETE FROM tickets WHERE id=?',[(tid,) for tid in ids])
+ db.execute('DELETE FROM conversations WHERE user_id=?',(user,))
+ db.execute('DELETE FROM user_rate_limits WHERE user_id=?',(user,))
+ # Private Telegram chat IDs equal user IDs. Clear queued/recent responses with PII.
+ db.execute('DELETE FROM telegram_outbox WHERE chat_id=?',(str(user),))
+ # Older update-journal versions retained complete Telegram payloads.
+ for row in db.execute('SELECT update_id,payload FROM updates').fetchall():
+  try:payload=json.loads(row['payload'])
+  except (TypeError,ValueError):continue
+  message=payload.get('message') or payload.get('edited_message') or {}
+  sender=message.get('from') or {}
+  chat=message.get('chat') or {}
+  if str(sender.get('id',''))==str(user) or str(chat.get('id',''))==str(user):
+   db.execute('DELETE FROM updates WHERE update_id=?',(row['update_id'],))
+ return len(ids)
 STOPWORDS={'the','is','are','what','does','about','and','for','from','you','can','how','to','a','an','of','in','on','do','say','tell','me','please','our','your','with'}
 def tokens(s):return set(re.findall(r'[\wА-Яа-яЁё]{3,}',s.lower()))-STOPWORDS
 def retrieve(question,d):
@@ -69,6 +112,9 @@ def main():
  a=s.add_parser('export');a.add_argument('user');a.add_argument('file',type=Path)
  a=s.add_parser('delete-user');a.add_argument('user');a.add_argument('--confirm',action='store_true')
  a=s.add_parser('health');a.add_argument('--backup',type=Path)
+ a=s.add_parser('outbox');a.add_argument('actor');a.add_argument('--operator',action='store_true')
+ a=s.add_parser('retry-delivery');a.add_argument('actor');a.add_argument('delivery_id',type=int);a.add_argument('--operator',action='store_true');a.add_argument('--confirm',action='store_true')
+ a=s.add_parser('purge-closed');a.add_argument('--older-than-days',type=int,required=True);a.add_argument('--confirm',action='store_true')
  a=s.add_parser('eval');a.add_argument('--report',type=Path,default=Path('evaluation-report.json'))
  z=p.parse_args();d=connect(z.db)
  try:
@@ -94,33 +140,53 @@ def main():
   elif z.cmd=='ticket':
    t=d.execute('SELECT * FROM tickets WHERE id=? '+('' if z.operator else 'AND user_id=?'),(z.ticket_id,) if z.operator else (z.ticket_id,z.actor)).fetchone()
    if t is None:p.error('Ticket not found')
-   print(json.dumps({'id':t['id'],'status':t['status'],'question':t['question'],'messages':[dict(m) for m in d.execute('SELECT author,body,created_at FROM messages WHERE ticket_id=? ORDER BY id',(z.ticket_id,))]},ensure_ascii=False,indent=2))
+   print(json.dumps({'id':t['id'],'status':t['status'],'question':t['question'],'messages':[dict(m) for m in d.execute('SELECT author,body,created_at FROM messages WHERE ticket_id=? ORDER BY id',(z.ticket_id,))],'events':[dict(e) for e in d.execute('SELECT actor,event,details,created_at FROM ticket_events WHERE ticket_id=? ORDER BY id',(z.ticket_id,))]},ensure_ascii=False,indent=2))
   elif z.cmd=='assign':
    require_operator(z.actor,p)
    if z.operator_id not in operator():p.error('Assigned operator must be in SUPPORT_OPERATORS')
    t=d.execute('SELECT id FROM tickets WHERE id=? AND status="open"',(z.ticket_id,)).fetchone()
    if not t:p.error('Open ticket not found')
-   d.execute('INSERT INTO operator_assignments(ticket_id,operator_id,assigned_at,assigned_by) VALUES(?,?,?,?) ON CONFLICT(ticket_id) DO UPDATE SET operator_id=excluded.operator_id,assigned_at=excluded.assigned_at,assigned_by=excluded.assigned_by',(z.ticket_id,z.operator_id,now(),z.actor));d.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(z.actor,'operator.assigned',z.ticket_id,now()));d.commit();print(f'Assigned to {z.operator_id}')
+   d.execute('INSERT INTO operator_assignments(ticket_id,operator_id,assigned_at,assigned_by) VALUES(?,?,?,?) ON CONFLICT(ticket_id) DO UPDATE SET operator_id=excluded.operator_id,assigned_at=excluded.assigned_at,assigned_by=excluded.assigned_by',(z.ticket_id,z.operator_id,now(),z.actor));d.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(z.actor,'operator.assigned',z.ticket_id,now()));d.execute('INSERT INTO ticket_events(ticket_id,actor,event,details,created_at) VALUES(?,?,?,?,?)',(z.ticket_id,z.actor,'assigned',z.operator_id,now()));d.commit();print(f'Assigned to {z.operator_id}')
   elif z.cmd=='reply':
    require_operator(z.actor,p)
    if not z.text.strip() or len(z.text)>MAX_TEXT:p.error('Reply must be non-empty and at most 4000 characters')
    t=d.execute('SELECT id FROM tickets WHERE id=? AND status="open"',(z.ticket_id,)).fetchone()
    if not t:p.error('Open ticket not found')
-   d.execute('INSERT OR IGNORE INTO messages(ticket_id,author,body,created_at) VALUES(?,?,?,?)',(z.ticket_id,z.actor,z.text,now()));d.execute('UPDATE tickets SET updated_at=? WHERE id=?',(now(),z.ticket_id));d.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(z.actor,'operator.replied',z.ticket_id,now()));d.commit();print('Operator reply stored; no user notification was sent.')
+   cur=d.execute('INSERT OR IGNORE INTO messages(ticket_id,author,body,created_at) VALUES(?,?,?,?)',(z.ticket_id,z.actor,z.text,now()))
+   if cur.rowcount:
+    d.execute('UPDATE tickets SET updated_at=? WHERE id=?',(now(),z.ticket_id));d.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(z.actor,'operator.replied',z.ticket_id,now()));d.execute('INSERT INTO ticket_events(ticket_id,actor,event,created_at) VALUES(?,?,?,?)',(z.ticket_id,z.actor,'operator.replied',now()))
+   d.commit();print('Operator reply stored; no user notification was sent.' if cur.rowcount else 'This reply is already recorded; no duplicate notification was sent.')
   elif z.cmd=='close':
    t=d.execute('SELECT id FROM tickets WHERE id=? '+('' if z.operator else 'AND user_id=?'),(z.ticket_id,) if z.operator else (z.ticket_id,z.actor)).fetchone()
    if not t:p.error('Ticket not found')
-   st='open' if z.reopen else 'closed';d.execute('UPDATE tickets SET status=?,updated_at=? WHERE id=?',(st,now(),z.ticket_id));d.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(z.actor,'ticket.'+st,z.ticket_id,now()));d.commit();print(f'Ticket {st}')
+   st='open' if z.reopen else 'closed';d.execute('UPDATE tickets SET status=?,updated_at=? WHERE id=?',(st,now(),z.ticket_id));d.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(z.actor,'ticket.'+st,z.ticket_id,now()));d.execute('INSERT INTO ticket_events(ticket_id,actor,event,created_at) VALUES(?,?,?,?)',(z.ticket_id,z.actor,st,now()));d.commit();print(f'Ticket {st}')
   elif z.cmd=='export':
-   rows=d.execute('SELECT id,status,question,created_at,updated_at FROM tickets WHERE user_id=? ORDER BY id',(z.user,)).fetchall();z.file.write_text(json.dumps([dict(r) for r in rows],ensure_ascii=False,indent=2),encoding='utf-8');print(f'Exported {len(rows)} ticket(s)')
+   rows=d.execute('SELECT id,status,question,internal_summary,citations,created_at,updated_at FROM tickets WHERE user_id=? ORDER BY id',(z.user,)).fetchall();data=[]
+   for row in rows:
+    item=dict(row);item['messages']=[dict(m) for m in d.execute('SELECT author,body,created_at FROM messages WHERE ticket_id=? ORDER BY id',(row['id'],))];item['events']=[dict(e) for e in d.execute('SELECT actor,event,details,created_at FROM ticket_events WHERE ticket_id=? ORDER BY id',(row['id'],))];data.append(item)
+   conversation=d.execute('SELECT created_at,updated_at,last_message FROM conversations WHERE user_id=?',(z.user,)).fetchone()
+   z.file.write_text(json.dumps({'tickets':data,'conversation':dict(conversation) if conversation else None},ensure_ascii=False,indent=2),encoding='utf-8');print(f'Exported {len(rows)} ticket(s), messages, event history and conversation data')
   elif z.cmd=='delete-user':
    if not z.confirm:p.error('Repeat with --confirm to delete user tickets and messages')
-   ids=[r[0] for r in d.execute('SELECT id FROM tickets WHERE user_id=?',(z.user,))];d.execute('DELETE FROM audit WHERE actor=?',(z.user,));d.executemany('DELETE FROM audit WHERE ticket_id=?',[(x,) for x in ids]);d.executemany('DELETE FROM tickets WHERE id=?',[(x,) for x in ids]);d.commit();print(f'Deleted {len(ids)} ticket(s)')
+   count=delete_user_data(d,z.user);d.commit();print(f'Deleted {count} ticket(s), conversation, queued chat responses and local update payloads')
   elif z.cmd=='health':
-   d.execute('PRAGMA quick_check').fetchone();
+   result=d.execute('PRAGMA quick_check').fetchone()[0]
+   if result!='ok':p.error('SQLite quick_check failed; restore a verified backup before continuing')
    if z.backup:
     out=sqlite3.connect(z.backup);d.backup(out);out.close();print(f'Backup created: {z.backup}')
    else:print('SQLite quick_check completed')
+  elif z.cmd=='outbox':
+   require_operator(z.actor,p)
+   rows=d.execute('SELECT id,update_id,sequence,chat_id,status,attempt_count,created_at,sent_at FROM telegram_outbox ORDER BY id DESC LIMIT 100').fetchall()
+   print(json.dumps([dict(r) for r in rows],ensure_ascii=False,indent=2))
+  elif z.cmd=='retry-delivery':
+   require_operator(z.actor,p)
+   if not z.confirm:p.error('Repeat with --confirm to queue a failed delivery for one retry on the next bot run')
+   if not requeue_failed_delivery(d,z.delivery_id):p.error('Only a failed delivery can be requeued; inspect uncertain items manually')
+   print(f'Delivery {z.delivery_id} queued for one retry on the next bot run.')
+  elif z.cmd=='purge-closed':
+   if not z.confirm:p.error('Repeat with --confirm to delete closed tickets older than the selected retention period')
+   count=purge_closed(d,z.older_than_days);d.commit();print(f'Purged {count} closed ticket(s). Open tickets were retained.')
   elif z.cmd=='eval':
    # Fixed synthetic cases cover evidence, partial/conflicting sources, stale/draft content and refusal.
    cases=[]

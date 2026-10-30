@@ -8,6 +8,10 @@ from telegram_runtime import process_update
 class FakeAPI:
  def __init__(self):self.sent=[]
  def send_message(self,chat,text):self.sent.append((str(chat),text))
+class FailingAPI:
+ def send_message(self,chat,text):
+  from telegram_api import TelegramAPIError
+  raise TelegramAPIError('synthetic failure')
 def update(uid,chat,text):return {'update_id':uid,'message':{'from':{'id':chat},'chat':{'id':chat,'type':'private'},'text':text}}
 
 class SupportTelegramTests(unittest.TestCase):
@@ -33,8 +37,37 @@ class SupportTelegramTests(unittest.TestCase):
    denied=handle_update(update(6,901,'/reply 1 duplicate attempt'),self.db)[0][1]
    self.assertIn('assigned to another operator',denied)
  def test_migrations_and_delete_scope(self):
-  self.assertEqual([r[0] for r in self.db.execute('select version from schema_migrations order by version')],[1,2,3])
+  self.assertEqual([r[0] for r in self.db.execute('select version from schema_migrations order by version')],[1,2,3,4,5])
   process_update(self.db,self.api,handle_update,update(1,101,'unknown'))
+  self.db.execute('INSERT INTO updates(update_id,created_at,payload,processed_at) VALUES(?,?,?,?)',('legacy-101','now','{"message":{"from":{"id":101},"chat":{"id":101}}}','now'))
+  self.db.execute('INSERT INTO updates(update_id,created_at,payload,processed_at) VALUES(?,?,?,?)',('legacy-202','now','{"message":{"from":{"id":202},"chat":{"id":202}}}','now'));self.db.commit()
   out=handle_update(update(2,101,'/delete_me CONFIRM'),self.db);self.assertIn('deleted',out[0][1])
   self.assertEqual(self.db.execute('select count(*) from tickets').fetchone()[0],0)
+  self.assertEqual(self.db.execute('select count(*) from user_rate_limits where user_id="101"').fetchone()[0],0)
+  self.assertEqual(self.db.execute('SELECT COUNT(*) FROM telegram_outbox WHERE chat_id="101"').fetchone()[0],0)
+  self.assertIsNone(self.db.execute('SELECT update_id FROM updates WHERE update_id="legacy-101"').fetchone())
+  self.assertIsNotNone(self.db.execute('SELECT update_id FROM updates WHERE update_id="legacy-202"').fetchone())
+ def test_delivery_failure_is_visible_and_only_failed_can_be_requeued(self):
+  process_update(self.db,FailingAPI(),handle_update,update(70,101,'synthetic question without FAQ'))
+  row=self.db.execute('SELECT id,status FROM telegram_outbox ORDER BY id LIMIT 1').fetchone()
+  self.assertEqual(row['status'],'failed')
+  self.assertEqual(self.db.execute('SELECT attempt_count FROM telegram_outbox WHERE id=?',(row['id'],)).fetchone()[0],1)
+  from app import requeue_failed_delivery
+  from telegram_runtime import flush_outbox
+  self.assertTrue(requeue_failed_delivery(self.db,row['id']))
+  self.assertEqual(self.db.execute('SELECT status FROM telegram_outbox WHERE id=?',(row['id'],)).fetchone()[0],'queued')
+  flush_outbox(self.db,self.api)
+  self.assertEqual(self.db.execute('SELECT status,attempt_count FROM telegram_outbox WHERE id=?',(row['id'],)).fetchone()['status'],'sent')
+  self.assertEqual(self.db.execute('SELECT attempt_count FROM telegram_outbox WHERE id=?',(row['id'],)).fetchone()[0],2)
+  self.db.execute("UPDATE telegram_outbox SET status='uncertain' WHERE id=?",(row['id'],));self.db.commit()
+  self.assertFalse(requeue_failed_delivery(self.db,row['id']))
+  self.assertEqual(self.db.execute('SELECT status FROM telegram_outbox WHERE id=?',(row['id'],)).fetchone()[0],'uncertain')
+ def test_user_erasure_remains_atomic_with_update_processing(self):
+  from app import delete_user_data,create_ticket
+  create_ticket('101','synthetic retained if transaction rolls back',[],self.db)
+  def failing_handler(update,db):
+   delete_user_data(db,'101')
+   raise RuntimeError('synthetic post-erasure failure')
+  with self.assertRaises(RuntimeError):process_update(self.db,self.api,failing_handler,update(99,101,'/delete_me CONFIRM'))
+  self.assertIsNotNone(self.db.execute('SELECT id FROM tickets WHERE user_id="101"').fetchone())
 if __name__=='__main__':unittest.main()

@@ -1,7 +1,51 @@
-import tempfile,unittest
+import tempfile,unittest,subprocess,sys,json,os
 from pathlib import Path
 import app
 class SupportTests(unittest.TestCase):
+ def test_persisted_rate_limit_and_window_reset(self):
+  with tempfile.TemporaryDirectory() as td:
+   d=app.connect(Path(td)/'s.db')
+   self.assertTrue(app.allow_request(d,'u',now_ts=100,limit=2));self.assertTrue(app.allow_request(d,'u',now_ts=101,limit=2))
+   self.assertFalse(app.allow_request(d,'u',now_ts=102,limit=2));self.assertTrue(app.allow_request(d,'u',now_ts=160,limit=2))
+   d.close()
+ def test_retention_purges_only_old_closed_tickets_and_audit(self):
+  from datetime import datetime,timezone
+  with tempfile.TemporaryDirectory() as td:
+   d=app.connect(Path(td)/'s.db')
+   old,_=app.create_ticket('u','old closed question',[],d);d.execute('UPDATE tickets SET status="closed",updated_at="2025-01-01T00:00:00+00:00" WHERE id=?',(old,))
+   opened,_=app.create_ticket('u','open question',[],d);d.execute('UPDATE tickets SET updated_at="2025-01-01T00:00:00+00:00" WHERE id=?',(opened,));d.commit()
+   self.assertEqual(app.purge_closed(d,30,datetime(2026,1,1,tzinfo=timezone.utc)),1)
+   self.assertIsNone(d.execute('SELECT id FROM tickets WHERE id=?',(old,)).fetchone());self.assertIsNotNone(d.execute('SELECT id FROM tickets WHERE id=?',(opened,)).fetchone())
+   self.assertEqual(d.execute('SELECT COUNT(*) FROM messages WHERE ticket_id=?',(old,)).fetchone()[0],0)
+   self.assertFalse(app.requeue_failed_delivery(d,999));d.close()
+ def test_backup_restore_round_trip(self):
+  import sqlite3
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td);db=app.connect(root/'source.db');app.create_ticket('u','synthetic backup question',[],db)
+   backup=sqlite3.connect(root/'backup.db');db.backup(backup);backup.close();db.close()
+   restored=app.connect(root/'backup.db')
+   self.assertEqual(restored.execute('SELECT question FROM tickets').fetchone()[0],'synthetic backup question');restored.close()
+ def test_cli_export_delete_confirmation_and_operator_delivery_controls(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td);db=app.connect(root/'support.db');tid,_=app.create_ticket('customer','synthetic question',[],db)
+   db.execute("INSERT INTO telegram_outbox(update_id,sequence,chat_id,text,status,created_at) VALUES(1,0,'42','safe synthetic reply','failed',?)",(app.now(),));db.commit();db.close()
+   exported=root/'export.json';env={**os.environ,'SUPPORT_OPERATORS':'900'}
+   run=subprocess.run([sys.executable,'app.py','--db',str(root/'support.db'),'export','customer',str(exported)],capture_output=True,text=True,env=env)
+   self.assertEqual(run.returncode,0,run.stderr);data=json.loads(exported.read_text());self.assertEqual(data['tickets'][0]['id'],tid)
+   d=app.connect(root/'support.db');d.execute('INSERT INTO updates(update_id,created_at,payload,processed_at) VALUES(?,?,?,?)',('legacy','now','{"message":{"from":{"id":"customer"},"chat":{"id":"customer"}}}','now'));d.commit();d.close()
+   denied=subprocess.run([sys.executable,'app.py','--db',str(root/'support.db'),'retry-delivery','901','1','--operator','--confirm'],capture_output=True,text=True,env=env)
+   self.assertNotEqual(denied.returncode,0);self.assertIn('Operator access denied',denied.stderr)
+   no_confirm=subprocess.run([sys.executable,'app.py','--db',str(root/'support.db'),'retry-delivery','900','1','--operator'],capture_output=True,text=True,env=env)
+   self.assertNotEqual(no_confirm.returncode,0)
+   retry=subprocess.run([sys.executable,'app.py','--db',str(root/'support.db'),'retry-delivery','900','1','--operator','--confirm'],capture_output=True,text=True,env=env)
+   self.assertEqual(retry.returncode,0,retry.stderr)
+   d=app.connect(root/'support.db');self.assertEqual(d.execute('SELECT status FROM telegram_outbox').fetchone()[0],'queued');d.close()
+   erase=subprocess.run([sys.executable,'app.py','--db',str(root/'support.db'),'delete-user','customer'],capture_output=True,text=True,env=env)
+   self.assertNotEqual(erase.returncode,0)
+   erased=subprocess.run([sys.executable,'app.py','--db',str(root/'support.db'),'delete-user','customer','--confirm'],capture_output=True,text=True,env=env)
+   self.assertEqual(erased.returncode,0,erased.stderr);d=app.connect(root/'support.db')
+   self.assertEqual(d.execute('SELECT COUNT(*) FROM tickets WHERE user_id="customer"').fetchone()[0],0)
+   self.assertEqual(d.execute('SELECT COUNT(*) FROM updates WHERE update_id="legacy"').fetchone()[0],0);d.close()
  def test_published_retrieval_and_draft_exclusion(self):
   with tempfile.TemporaryDirectory() as td:
    d=app.connect(Path(td)/'s.db');d.execute('insert into documents(title,status,content,updated_at) values(?,?,?,?)',('Draft','draft','Returns take 30 days.','now'));self.assertEqual(app.retrieve('returns days',d),[])
@@ -44,7 +88,16 @@ class SupportTests(unittest.TestCase):
    d=app.connect(path)
    columns={r[1] for r in d.execute('PRAGMA table_info(updates)')}
    self.assertTrue({'update_id','created_at','payload','processed_at'}<=columns)
-   self.assertEqual(d.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],3)
+   self.assertEqual(d.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],5)
    d.close()
+ def test_migration_from_v4_adds_delivery_attempt_count(self):
+  import sqlite3
+  from migrations import _v1,_v2,_v3,_v4
+  with tempfile.TemporaryDirectory() as td:
+   path=Path(td)/'v4.db';raw=sqlite3.connect(path);raw.execute('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)')
+   for version,migration in enumerate((_v1,_v2,_v3,_v4),1):migration(raw);raw.execute('INSERT INTO schema_migrations VALUES(?,?)',(version,'synthetic'))
+   raw.execute("INSERT INTO telegram_outbox(update_id,sequence,chat_id,text,status,created_at) VALUES(1,0,'42','test','failed','now')");raw.commit();raw.close()
+   d=app.connect(path);row=d.execute('SELECT status,attempt_count FROM telegram_outbox').fetchone()
+   self.assertEqual((row['status'],row['attempt_count']),('failed',0));self.assertEqual(d.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],5);d.close()
 
 if __name__=='__main__':unittest.main()

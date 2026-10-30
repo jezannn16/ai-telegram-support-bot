@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json
 from telegram_runtime import start
-from app import MAX_TEXT,create_ticket,now,operator,retrieve
+from app import MAX_TEXT,allow_request,create_ticket,delete_user_data,now,operator,retrieve
 
 def _event(db,actor,event,ticket_id,details=''):
  db.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(actor,event,ticket_id,now()))
@@ -19,6 +19,7 @@ def handle_update(update,db):
  message=update.get('message') or {};sender=message.get('from') or {};chat=message.get('chat') or {};user=str(sender.get('id',''));chat_id=chat.get('id');text=str(message.get('text','')).strip()
  if not user or chat.get('type')!='private' or not text:return []
  if len(text)>MAX_TEXT:return [(chat_id,'Please keep the message under 4000 characters.')]
+ if not allow_request(db,user):return [(chat_id,'You are sending messages too quickly. Please wait a minute and try again.')]
  if chat_id is None:return []
  _conversation(db,user);db.execute('UPDATE conversations SET last_message=? WHERE user_id=?',(text[:MAX_TEXT],user))
  parts=text.split(maxsplit=1);command=parts[0].split('@',1)[0].lower();arg=parts[1].strip() if len(parts)>1 else ''
@@ -79,15 +80,14 @@ def handle_update(update,db):
   cur=db.execute('INSERT OR IGNORE INTO messages(ticket_id,author,body,created_at) VALUES(?,?,?,?)',(tid,user,bits[1],now()))
   if not cur.rowcount:return [(chat_id,'This reply is already recorded; no duplicate notification was sent.')]
   db.execute('UPDATE tickets SET updated_at=? WHERE id=?',(now(),tid));_event(db,user,'operator.replied',tid)
-  return [(chat_id,'Reply recorded and sent to the customer.'),(ticket['user_id'],f'Operator reply on ticket #{tid}: {bits[1]}')]
+  return [(chat_id,'Reply recorded; delivery is queued and its status is tracked.'),(ticket['user_id'],f'Operator reply on ticket #{tid}: {bits[1]}')]
  if command=='/export':
   tickets=_my_tickets(db,user);data=[]
   for t in tickets:data.append({'ticket':dict(t),'messages':[dict(m) for m in _messages(db,t['id'])]})
   return [(chat_id,json.dumps(data,ensure_ascii=False,indent=2)[:3900] or 'No data.')]
  if command=='/delete_me':
   if arg!='CONFIRM':return [(chat_id,'To delete your local support history, send /delete_me CONFIRM.')]
-  ids=[r[0] for r in db.execute('SELECT id FROM tickets WHERE user_id=?',(user,))]
-  db.execute('DELETE FROM audit WHERE actor=?',(user,));db.executemany('DELETE FROM audit WHERE ticket_id=?',[(x,) for x in ids]);db.executemany('DELETE FROM tickets WHERE id=?',[(x,) for x in ids]);db.execute('DELETE FROM conversations WHERE user_id=?',(user,));return [(chat_id,'Your support history was deleted.')]
+  delete_user_data(db,user);return [(chat_id,'Your support history was deleted.')]
  if command.startswith('/') and command not in ('/faq',):return [(chat_id,'Unknown command. Send /help.')]
  question=arg if command=='/faq' else text
  if not question:return [(chat_id,'Please include a question after /faq.')]

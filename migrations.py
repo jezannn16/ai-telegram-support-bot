@@ -24,11 +24,16 @@ def _v3(db):
  CREATE TABLE IF NOT EXISTS telegram_outbox(id INTEGER PRIMARY KEY,update_id INTEGER NOT NULL,sequence INTEGER NOT NULL,chat_id TEXT NOT NULL,text TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',created_at TEXT NOT NULL,sent_at TEXT,UNIQUE(update_id,sequence));''')
  cols={r[1] for r in db.execute('PRAGMA table_info(conversations)')}
  if 'last_message' not in cols:db.execute("ALTER TABLE conversations ADD COLUMN last_message TEXT NOT NULL DEFAULT ''")
+def _v4(db):
+ db.execute('CREATE TABLE IF NOT EXISTS user_rate_limits(user_id TEXT PRIMARY KEY,window_started_at REAL NOT NULL,request_count INTEGER NOT NULL)')
+def _v5(db):
+ cols={r[1] for r in db.execute('PRAGMA table_info(telegram_outbox)')}
+ if 'attempt_count' not in cols:db.execute('ALTER TABLE telegram_outbox ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0')
 def connect(path):
  db=sqlite3.connect(path);db.row_factory=sqlite3.Row;db.execute('PRAGMA foreign_keys=ON');db.execute('PRAGMA journal_mode=WAL');db.execute('PRAGMA busy_timeout=5000')
  db.execute('CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)')
  current=db.execute('SELECT COALESCE(MAX(version),0) FROM schema_migrations').fetchone()[0]
- for version,migration in enumerate((_v1,_v2,_v3),1):
+ for version,migration in enumerate((_v1,_v2,_v3,_v4,_v5),1):
   if version>current:
    migration(db);db.execute('INSERT INTO schema_migrations VALUES(?,?)',(version,datetime.now(timezone.utc).isoformat()));db.commit()
  return db

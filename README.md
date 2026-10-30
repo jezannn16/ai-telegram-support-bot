@@ -93,8 +93,10 @@ The CLI stores a reply locally and does not notify the customer. Telegram `/repl
 
 - The SQLite database stores customer messages and operator activity. Protect the database and any backups as support data.
 - Telegram accepts private chats only. Customer ticket queries are scoped by Telegram user ID; operator commands check the current `SUPPORT_OPERATORS` allowlist.
+- Telegram requests are limited to 10 per user in a persisted 60-second window; oversized messages are rejected before ticket processing.
+- Use `purge-closed --older-than-days N --confirm` to enforce a local retention window for closed tickets; open tickets are retained. `export USER FILE` includes tickets, messages, event history, and conversation data. User deletion also clears queued chat responses and legacy update payloads for that user.
 - Bot polling itself sends replies for accepted messages. Do not start it with a production token when testing synthetic cases.
-- The durable outbox uses at-most-once delivery. A `failed` or `uncertain` entry requires inspection before a manual retry because delivery may already have occurred.
+- The durable outbox uses at-most-once delivery. Inspect it with `outbox OPERATOR_ID --operator`; `retry-delivery OPERATOR_ID ID --operator --confirm` queues only a definite `failed` item for another attempt. An `uncertain` item requires manual inspection because delivery may already have occurred. Attempt counts are persisted.
 - PDF parsing extracts embedded text only. Scanned-document OCR, automated retention, restore drills, rate limiting, webhook mode, hosted deployment, and LLM/RAG are not implemented.
 - The evaluation uses synthetic cases and measures behavior/citation structure. It is not a benchmark of general support accuracy.
 
