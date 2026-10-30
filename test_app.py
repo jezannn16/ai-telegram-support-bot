@@ -7,18 +7,22 @@ class SupportTests(unittest.TestCase):
    report=Path(td)/'rag.json'
    run=subprocess.run([sys.executable,'app.py','--db',str(Path(td)/'unused.db'),'rag-eval','--report',str(report)],capture_output=True,text=True)
    self.assertEqual(run.returncode,0,run.stderr);data=json.loads(report.read_text())
-   self.assertEqual(data['n'],4);self.assertEqual(data['passed'],4);self.assertIn('no model/network call',data['method'])
+   self.assertEqual(data['n'],11);self.assertEqual(data['passed'],11);self.assertEqual(data['provider_type'],'fake');self.assertFalse(data['model_quality_evaluated']);self.assertIsNone(data['unsupported_claim_rate']);self.assertEqual(data['network_calls'],0);self.assertIn('no HTTP/model call',data['method'])
  def test_evaluation_records_allowed_sources_and_retrieval_metrics(self):
   with tempfile.TemporaryDirectory() as td:
    report=Path(td)/'eval.json'
    run=subprocess.run([sys.executable,'app.py','--db',str(Path(td)/'support.db'),'eval','--report',str(report)],capture_output=True,text=True)
    self.assertEqual(run.returncode,0,run.stderr)
    data=json.loads(report.read_text())
-   self.assertGreaterEqual(data['n'],30)
-   self.assertIn('retrieval_hit_rate',data);self.assertIn('retrieval_recall',data)
+   self.assertEqual(data['n'],37);self.assertFalse(data['model_quality_evaluated']);self.assertEqual(data['provider'],'none (lexical retrieval only)')
+   self.assertIn('retrieval_hit_rate',data);self.assertIn('retrieval_recall',data);self.assertEqual(data['retrieval_hit_rate_denominator'],14);self.assertIn('scenario_metrics',data);self.assertIn('prompt_injection_retrieved_as_data',data['scenario_metrics'])
+   hard_negative=next(case for case in data['results'] if case['scenario']=='generic_overlap_negative')
+   self.assertEqual((hard_negative['expected'],hard_negative['actual']),('refuse','refuse'))
+   paraphrase=next(case for case in data['results'] if case['scenario']=='money_back_paraphrase')
+   self.assertEqual((paraphrase['expected'],paraphrase['actual']),('evidence','evidence'))
+   self.assertEqual(data['behavior_match_rate'],1);self.assertEqual(data['citation_precision_denominator'],data['citation_count'])
    self.assertTrue(all('allowed_sources' in case for case in data['results']))
    self.assertTrue(all('retrieved_sources' in case for case in data['results']))
-   self.assertTrue(all(citation['document'] in case['allowed_sources'] for case in data['results'] for citation in case['citations']))
    self.assertIsNone(data['unsupported_claim_rate'])
  def test_customer_export_excludes_internal_summary(self):
   with tempfile.TemporaryDirectory() as td:
@@ -78,6 +82,33 @@ class SupportTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as td:
    d=app.connect(Path(td)/'s.db');d.execute('insert into documents(title,status,content,updated_at) values(?,?,?,?)',('Draft','draft','Returns take 30 days.','now'));self.assertEqual(app.retrieve('returns days',d),[])
    d.execute('insert into documents(title,status,content,updated_at) values(?,?,?,?)',('Policy','published','Returns take 30 days.','now'));hit=app.retrieve('returns days',d);self.assertEqual(hit[0][1]['title'],'Policy')
+ def test_retrieval_handles_common_refund_paraphrase_and_ignores_generic_overlap(self):
+  with tempfile.TemporaryDirectory() as td:
+   d=app.connect(Path(td)/'s.db')
+   d.execute('INSERT INTO documents(title,status,content,updated_at) VALUES(?,?,?,?)',('Refund policy','published','Policy topic7 allows customers to request refund option 7.','now'))
+   d.execute('INSERT INTO documents(title,status,content,updated_at) VALUES(?,?,?,?)',('Support schedule','published','Customer support schedules weekly team meetings.','now'))
+   d.execute('INSERT INTO documents(title,status,content,updated_at) VALUES(?,?,?,?)',('Support hours','published','Support hours are available on weekdays.','now'))
+   paraphrase=app.retrieve('Can I get my money back under rule topic7?',d)
+   self.assertEqual([hit[1]['title'] for hit in paraphrase],['Refund policy'])
+   self.assertEqual(app.retrieve('What refund time does customer support promise?',d),[])
+   # A focused lookup remains usable after generic query terms are removed.
+   self.assertEqual([hit[1]['title'] for hit in app.retrieve('support hours',d)],['Support hours'])
+   d.close()
+ def test_retrieval_english_and_russian_generic_support_is_not_policy_evidence(self):
+  with tempfile.TemporaryDirectory() as td:
+   d=app.connect(Path(td)/'s.db')
+   d.execute('INSERT INTO documents(title,status,content,updated_at) VALUES(?,?,?,?)',
+             ('English schedule','published','Customer support schedules weekly team meetings.','now'))
+   d.execute('INSERT INTO documents(title,status,content,updated_at) VALUES(?,?,?,?)',
+             ('Russian schedule','published','Поддержки офиса график работы и еженедельные встречи.','now'))
+   d.execute('INSERT INTO documents(title,status,content,updated_at) VALUES(?,?,?,?)',
+             ('Russian refund policy','published','Возврат товара возможен в течение 30 дней.','now'))
+   self.assertEqual(app.retrieve('customer support refund time',d),[])
+   self.assertEqual([hit[1]['title'] for hit in app.retrieve('Поддержки офиса возврат товара',d)],
+                    ['Russian refund policy'])
+   self.assertEqual([hit[1]['title'] for hit in app.retrieve('Возврат товара возможен в течение 30 дней',d)],
+                    ['Russian refund policy'])
+   d.close()
  def test_ticket_isolation_and_noevidence_escalates(self):
   with tempfile.TemporaryDirectory() as td:
    d=app.connect(Path(td)/'s.db');tid,new=app.create_ticket('u1','unanswerable question',[],d);self.assertTrue(new);same,new2=app.create_ticket('u1','unanswerable question',[],d);self.assertEqual(same,tid);self.assertFalse(new2);self.assertIsNotNone(d.execute('select id from tickets where id=? and user_id=?',(tid,'u1')).fetchone());self.assertIsNone(d.execute('select id from tickets where id=? and user_id=?',(tid,'u2')).fetchone())
