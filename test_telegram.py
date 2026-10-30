@@ -62,6 +62,20 @@ class SupportTelegramTests(unittest.TestCase):
   self.db.execute("UPDATE telegram_outbox SET status='uncertain' WHERE id=?",(row['id'],));self.db.commit()
   self.assertFalse(requeue_failed_delivery(self.db,row['id']))
   self.assertEqual(self.db.execute('SELECT status FROM telegram_outbox WHERE id=?',(row['id'],)).fetchone()[0],'uncertain')
+ def test_outbox_claim_lost_to_another_worker_does_not_send_twice(self):
+  from telegram_runtime import flush_outbox
+  self.db.execute("INSERT INTO telegram_outbox(update_id,sequence,chat_id,text,created_at,status) VALUES(?,?,?,?,?,'queued')",(91,0,'101','synthetic response','now'));self.db.commit()
+  class RacingDB:
+   raced=False
+   def commit(inner):self.db.commit()
+   def execute(inner,sql,args=()):
+    result=self.db.execute(sql,args)
+    if sql.startswith('SELECT * FROM telegram_outbox') and not inner.raced:
+     inner.raced=True;self.db.execute("UPDATE telegram_outbox SET status='sent' WHERE update_id=91");self.db.commit()
+    return result
+  flush_outbox(RacingDB(),self.api)
+  self.assertEqual(self.api.sent,[])
+  self.assertEqual(self.db.execute('SELECT attempt_count FROM telegram_outbox WHERE update_id=91').fetchone()[0],0)
  def test_user_erasure_remains_atomic_with_update_processing(self):
   from app import delete_user_data,create_ticket
   create_ticket('101','synthetic retained if transaction rolls back',[],self.db)

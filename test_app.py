@@ -2,6 +2,16 @@ import tempfile,unittest,subprocess,sys,json,os
 from pathlib import Path
 import app
 class SupportTests(unittest.TestCase):
+ def test_customer_export_excludes_internal_summary(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td);db_path=root/'support.db';d=app.connect(db_path)
+   app.create_ticket('customer','Synthetic private question',[],d);d.close()
+   export=root/'customer.json'
+   run=subprocess.run([sys.executable,'app.py','--db',str(db_path),'export','customer',str(export)],capture_output=True,text=True)
+   self.assertEqual(run.returncode,0,run.stderr)
+   item=json.loads(export.read_text())['tickets'][0]
+   self.assertNotIn('internal_summary',item)
+   self.assertNotIn('Customer asked:',export.read_text())
  def test_persisted_rate_limit_and_window_reset(self):
   with tempfile.TemporaryDirectory() as td:
    d=app.connect(Path(td)/'s.db')

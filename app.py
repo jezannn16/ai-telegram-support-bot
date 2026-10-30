@@ -161,7 +161,7 @@ def main():
    if not t:p.error('Ticket not found')
    st='open' if z.reopen else 'closed';d.execute('UPDATE tickets SET status=?,updated_at=? WHERE id=?',(st,now(),z.ticket_id));d.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(z.actor,'ticket.'+st,z.ticket_id,now()));d.execute('INSERT INTO ticket_events(ticket_id,actor,event,created_at) VALUES(?,?,?,?)',(z.ticket_id,z.actor,st,now()));d.commit();print(f'Ticket {st}')
   elif z.cmd=='export':
-   rows=d.execute('SELECT id,status,question,internal_summary,citations,created_at,updated_at FROM tickets WHERE user_id=? ORDER BY id',(z.user,)).fetchall();data=[]
+   rows=d.execute('SELECT id,status,question,citations,created_at,updated_at FROM tickets WHERE user_id=? ORDER BY id',(z.user,)).fetchall();data=[]
    for row in rows:
     item=dict(row);item['messages']=[dict(m) for m in d.execute('SELECT author,body,created_at FROM messages WHERE ticket_id=? ORDER BY id',(row['id'],))];item['events']=[dict(e) for e in d.execute('SELECT actor,event,details,created_at FROM ticket_events WHERE ticket_id=? ORDER BY id',(row['id'],))];data.append(item)
    conversation=d.execute('SELECT created_at,updated_at,last_message FROM conversations WHERE user_id=?',(z.user,)).fetchone()

@@ -8,7 +8,9 @@ logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(messa
 def flush_outbox(db,api):
  rows=db.execute("SELECT * FROM telegram_outbox WHERE status='queued' ORDER BY id").fetchall()
  for row in rows:
-  db.execute("UPDATE telegram_outbox SET status='sending',attempt_count=attempt_count+1 WHERE id=? AND status='queued'",(row['id'],));db.commit()
+  claimed=db.execute("UPDATE telegram_outbox SET status='sending',attempt_count=attempt_count+1 WHERE id=? AND status='queued'",(row['id'],))
+  db.commit()
+  if claimed.rowcount != 1: continue
   try:api.send_message(row['chat_id'],row['text'])
   except TelegramAPIError:
    db.execute("UPDATE telegram_outbox SET status='failed' WHERE id=?",(row['id'],));db.commit();logging.warning('Telegram delivery failed; response retained in local outbox')
