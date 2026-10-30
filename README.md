@@ -25,10 +25,11 @@
 
 ## Quick start
 
-Python 3.11 or newer is required. The install includes `pypdf` for text-based PDF import:
+Python 3.11 or newer is required. Check that `python3 --version` reports a supported version; if your system's `python3` is older, use the explicit path to an installed Python 3.11+ executable in the venv command. The install includes `pypdf` for text-based PDF import:
 
 ```sh
 python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -e .
 ```
 
