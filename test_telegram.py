@@ -36,6 +36,12 @@ class SupportTelegramTests(unittest.TestCase):
    self.assertNotIn('Internal summary',public);self.assertIn('Please send',public)
    denied=handle_update(update(6,901,'/reply 1 duplicate attempt'),self.db)[0][1]
    self.assertIn('assigned to another operator',denied)
+   self.db.execute('UPDATE tickets SET citations=? WHERE id=1',('[{"document":"Synthetic FAQ","excerpt":"Synthetic source detail"}]',));self.db.commit()
+   operator_view=handle_update(update(7,900,'/ticket 1'),self.db)[0][1]
+   self.assertIn('Internal handoff summary (extractive)',operator_view)
+   self.assertIn('Operator reply: Please send the order number.',operator_view)
+   self.assertIn('Source Synthetic FAQ: Synthetic source detail',operator_view)
+   self.assertNotIn('Internal handoff summary',public)
  def test_migrations_and_delete_scope(self):
   self.assertEqual([r[0] for r in self.db.execute('select version from schema_migrations order by version')],[1,2,3,4,5])
   process_update(self.db,self.api,handle_update,update(1,101,'unknown'))

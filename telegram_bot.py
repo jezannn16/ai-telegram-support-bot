@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json
 from telegram_runtime import start
-from app import MAX_TEXT,allow_request,create_ticket,delete_user_data,now,operator,retrieve
+from app import MAX_TEXT,allow_request,create_ticket,delete_user_data,now,operator,retrieve,summarize_ticket
 
 def _event(db,actor,event,ticket_id,details=''):
  db.execute('INSERT INTO audit(actor,event,ticket_id,created_at) VALUES(?,?,?,?)',(actor,event,ticket_id,now()))
@@ -37,7 +37,7 @@ def handle_update(update,db):
   if ticket is None:return [(chat_id,'Ticket not found.')]
   lines=[f"Ticket #{tid} — {ticket['status']}",f"Question: {ticket['question']}"]
   if is_operator:
-   lines.append(f"Internal summary: {ticket['internal_summary']}")
+   lines.append('Internal handoff summary (extractive):\n'+summarize_ticket(db,tid))
    ass=db.execute('SELECT operator_id FROM operator_assignments WHERE ticket_id=?',(tid,)).fetchone()
    lines.append(f"Assigned: {ass['operator_id'] if ass else 'unassigned'}")
    citations=json.loads(ticket['citations']);lines.extend('Source: '+c.get('document','')+' '+c.get('excerpt','')[:300] for c in citations)

@@ -16,4 +16,4 @@ Incoming update IDs and outgoing messages are stored in SQLite. Delivery follows
 
 ## Knowledge quality
 
-Publish only reviewed, current documents. FAQ retrieval returns source excerpts when lexical overlap is strong enough; otherwise it opens or reuses a ticket. Retrieval does not assess policy meaning. Check citations and wording before relying on excerpts. Scanned PDF OCR is unsupported.
+Publish only reviewed, current documents. FAQ retrieval returns source excerpts when lexical overlap is strong enough; otherwise it opens or reuses a ticket. Operator ticket view includes a bounded extractive handoff summary with recent dialogue and retrieved source excerpts; it does not infer intent or policy meaning. Check citations and wording before relying on excerpts. Scanned PDF OCR is unsupported.

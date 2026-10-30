@@ -74,7 +74,7 @@ flowchart LR
     G --> H[Reply stored and sent to customer chat]
 ```
 
-The lexical matcher looks for term overlap in published paragraphs or PDF pages. It excludes draft and retired documents. It does not interpret policy meaning, generate an answer, assess truth, or invoke an LLM.
+The lexical matcher looks for term overlap in published paragraphs or PDF pages. It excludes draft and retired documents. It does not interpret policy meaning, generate an answer, assess truth, or invoke an LLM. Operator ticket views include a bounded extractive handoff summary of the ticket dialogue and source excerpts; customers never see this internal summary.
 
 ## Operator workflow
 
@@ -98,7 +98,7 @@ The CLI stores a reply locally and does not notify the customer. Telegram `/repl
 - Bot polling itself sends replies for accepted messages. Do not start it with a production token when testing synthetic cases.
 - The durable outbox uses at-most-once delivery. Inspect it with `outbox OPERATOR_ID --operator`; `retry-delivery OPERATOR_ID ID --operator --confirm` queues only a definite `failed` item for another attempt. An `uncertain` item requires manual inspection because delivery may already have occurred. Attempt counts are persisted.
 - PDF parsing extracts embedded text only. Scanned-document OCR, automated retention, restore drills, rate limiting, webhook mode, hosted deployment, and LLM/RAG are not implemented.
-- The evaluation uses synthetic cases and measures behavior/citation structure. It is not a benchmark of general support accuracy.
+- The reproducible evaluation has 34 synthetic cases, records each case's allowed document titles, and reports behavior match, retrieval hit rate/recall, and citations matching an allowed source. Unsupported-claim rate stays unscored because the lexical system emits excerpts rather than generated answers; it requires human review if answer generation is added. This is not a benchmark of general support accuracy.
 
 ## Development
 

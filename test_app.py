@@ -2,6 +2,18 @@ import tempfile,unittest,subprocess,sys,json,os
 from pathlib import Path
 import app
 class SupportTests(unittest.TestCase):
+ def test_evaluation_records_allowed_sources_and_retrieval_metrics(self):
+  with tempfile.TemporaryDirectory() as td:
+   report=Path(td)/'eval.json'
+   run=subprocess.run([sys.executable,'app.py','--db',str(Path(td)/'support.db'),'eval','--report',str(report)],capture_output=True,text=True)
+   self.assertEqual(run.returncode,0,run.stderr)
+   data=json.loads(report.read_text())
+   self.assertGreaterEqual(data['n'],30)
+   self.assertIn('retrieval_hit_rate',data);self.assertIn('retrieval_recall',data)
+   self.assertTrue(all('allowed_sources' in case for case in data['results']))
+   self.assertTrue(all('retrieved_sources' in case for case in data['results']))
+   self.assertTrue(all(citation['document'] in case['allowed_sources'] for case in data['results'] for citation in case['citations']))
+   self.assertIsNone(data['unsupported_claim_rate'])
  def test_customer_export_excludes_internal_summary(self):
   with tempfile.TemporaryDirectory() as td:
    root=Path(td);db_path=root/'support.db';d=app.connect(db_path)
