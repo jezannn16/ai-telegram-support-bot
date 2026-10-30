@@ -12,7 +12,9 @@ Customer actions are scoped to the Telegram numeric user ID. The CLI `export USE
 
 ## Delivery and recovery
 
-Incoming update IDs and outgoing messages are stored in SQLite. Delivery follows at-most-once handling. Inspect delivery state with `outbox OPERATOR_ID --operator`. A definite `failed` item can be queued once per operator action with `retry-delivery OPERATOR_ID ID --operator --confirm`; queued work sends on the next bot run. A `sending` item left by a crash becomes `uncertain` and must not be retried until delivery is checked because it may already have reached Telegram. Attempt counts are stored. Use `health --backup <path>` for a SQLite-consistent backup; the test suite runs a local backup/restore round trip.
+Incoming update IDs and outgoing messages are stored in SQLite. Delivery follows at-most-once handling. Inspect delivery state with `outbox OPERATOR_ID --operator`. A definite `failed` item can be queued once per operator action with `retry-delivery OPERATOR_ID ID --operator --confirm`; queued work sends on the next bot run. A `sending` item left by a crash becomes `uncertain` and must not be retried until delivery is checked because it may already have reached Telegram. Attempt counts are stored.
+
+Create a verified owner-only backup at a new filename with `python3 app.py --db support.sqlite3 health --backup /safe/path/support-backup-2026-10-30.sqlite3`. Existing backup paths and symlinks are refused. To restore, stop polling and every other process using the database, verify the selected backup path, then run `python3 app.py --db support.sqlite3 restore /safe/path/support-backup-2026-10-30.sqlite3 --confirm`. The command checks full SQLite integrity, foreign keys, migration version, and required columns. It rejects symlinked database/sidecar paths and unrelated destination databases; SQLite's backup API handles existing WAL databases. A changed destination aborts before restore, and missing destinations are created atomically without overwriting a path created concurrently. Restore replaces current records; exports/backups may retain deleted customer data, so protect and age them out separately.
 
 ## Knowledge quality
 

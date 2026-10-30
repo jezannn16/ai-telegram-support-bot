@@ -9,6 +9,146 @@ DB=Path(__file__).with_name('support.sqlite3'); MAX_TEXT=4000; MAX_DOC=50000
 def connect(path=DB):
  return connect_db(path)
 
+def _validate_support_database(db:sqlite3.Connection,label:str)->None:
+ checks=[row[0] for row in db.execute('PRAGMA integrity_check')]
+ if checks!=['ok']:raise ValueError(f'{label} integrity check failed')
+ if db.execute('PRAGMA foreign_key_check').fetchone() is not None:raise ValueError(f'{label} foreign-key check failed')
+ tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+ if 'schema_migrations' not in tables:raise ValueError(f'{label} is not a supported Support Bot database')
+ migration_columns={row[1] for row in db.execute('PRAGMA table_info(schema_migrations)')}
+ if not {'version','applied_at'}<=migration_columns:raise ValueError(f'{label} schema does not match its migration version')
+ versions=[row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
+ if versions!=list(range(1,len(versions)+1)) or not 1<=len(versions)<=5:
+  raise ValueError(f'{label} schema version is not supported')
+ version=len(versions)
+ expected={
+  'documents':{'id','title','version','status','content','updated_at'},
+  'tickets':{'id','user_id','question','internal_summary','status','citations','created_at','updated_at'},
+  'messages':{'id','ticket_id','author','body','created_at'},
+  'audit':{'id','actor','event','ticket_id','created_at'},
+  'updates':{'update_id','created_at'},
+ }
+ if version>=2:expected|={'operator_assignments':{'ticket_id','operator_id','assigned_at','assigned_by'},'conversations':{'id','user_id','created_at','updated_at','last_message'},'ticket_events':{'id','ticket_id','actor','event','details','created_at'}}
+ if version>=3:expected|={'bot_updates':{'update_id','processed_at'},'telegram_outbox':{'id','update_id','sequence','chat_id','text','status','created_at','sent_at'}}
+ if version>=4:expected['user_rate_limits']={'user_id','window_started_at','request_count'}
+ if version>=5:expected['telegram_outbox'].add('attempt_count')
+ for table,columns in expected.items():
+  if table not in tables or not columns<={row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}:
+   raise ValueError(f'{label} schema does not match its migration version')
+
+def create_backup(db:sqlite3.Connection,backup_path:Path)->None:
+ """Write a verified, owner-only backup without following or replacing paths."""
+ backup_path=backup_path.expanduser().absolute()
+ if backup_path.is_symlink():raise ValueError('Backup path must not be a symbolic link')
+ if backup_path.exists():raise ValueError('Backup file already exists; choose a new path')
+ if not backup_path.parent.is_dir():raise ValueError('Backup directory does not exist')
+ for suffix in ('-wal','-shm','-journal'):
+  if Path(str(backup_path)+suffix).exists():raise ValueError('Backup sidecar already exists; choose a clean path')
+ temporary=None
+ try:
+  fd,temporary=tempfile.mkstemp(prefix=f'.{backup_path.name}.backup-',suffix='.sqlite3',dir=backup_path.parent)
+  os.close(fd);os.chmod(temporary,0o600)
+  target=sqlite3.connect(temporary)
+  try:db.backup(target);_validate_support_database(target,'Created backup')
+  finally:target.close()
+  os.link(temporary,backup_path)
+  Path(temporary).unlink();temporary=None
+ except sqlite3.Error as exc:
+  raise ValueError('Could not create a verified SQLite backup') from exc
+ finally:
+  if temporary:
+   try:Path(temporary).unlink()
+   except FileNotFoundError:pass
+
+def _database_signature(path:Path):
+ result=[]
+ for item in (path,Path(str(path)+'-wal'),Path(str(path)+'-shm'),Path(str(path)+'-journal')):
+  try:info=item.lstat()
+  except FileNotFoundError:result.append(None);continue
+  if item.is_symlink():raise ValueError('Database and sidecar paths must not be symbolic links')
+  result.append((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns))
+ return tuple(result)
+
+def _require_self_contained_backup(path:Path)->None:
+ # immutable=1 deliberately ignores WAL contents. Accepting a source with a WAL
+ # would silently restore only its older main-file snapshot and lose committed data.
+ for suffix in ('-wal','-shm','-journal'):
+  if os.path.lexists(str(path)+suffix):
+   raise ValueError('Backup must be self-contained and have no SQLite sidecar files')
+
+def restore_database(backup_path:Path,destination:Path,confirm:bool=False)->None:
+ """Verify the backup, then restore through SQLite without orphaning WAL files."""
+ if not confirm:raise ValueError('Repeat with --confirm to replace the local database from this backup')
+ backup_path=backup_path.expanduser().absolute();destination=destination.expanduser().absolute()
+ if backup_path.is_symlink():raise ValueError('Backup path must not be a symbolic link')
+ if destination.is_symlink():raise ValueError('Local database path must not be a symbolic link')
+ if os.path.abspath(backup_path)==os.path.abspath(destination):raise ValueError('Backup path must differ from the local database path')
+ if destination.exists() and os.path.samefile(backup_path,destination):raise ValueError('Backup path must differ from the local database path')
+ if not backup_path.is_file():raise ValueError('Backup file not found')
+ if not destination.parent.is_dir():raise ValueError('Local database directory does not exist')
+ for path in (backup_path,destination):
+  for suffix in ('-wal','-shm','-journal'):
+   if Path(str(path)+suffix).is_symlink():raise ValueError('Database sidecar paths must not be symbolic links')
+ destination_signature=_database_signature(destination)
+ temporary=None
+
+ try:
+  _require_self_contained_backup(backup_path)
+  source_signature=_database_signature(backup_path)
+  # immutable=1 prevents SQLite from requiring writable WAL sidecars when
+  # validating a self-contained backup created by SQLite's backup API.
+  source=sqlite3.connect(backup_path.as_uri()+'?mode=ro&immutable=1',uri=True)
+  try:
+   _require_self_contained_backup(backup_path)
+   if _database_signature(backup_path)!=source_signature:raise ValueError('Backup changed while it was being opened')
+   _validate_support_database(source,'Backup')
+   fd,temporary=tempfile.mkstemp(prefix=f'.{destination.name}.restore-',suffix='.sqlite3',dir=destination.parent)
+   os.close(fd);os.chmod(temporary,0o600)
+   staged=sqlite3.connect(temporary)
+   try:
+    source.backup(staged)
+    _require_self_contained_backup(backup_path)
+    if _database_signature(backup_path)!=source_signature:raise ValueError('Backup changed while it was being copied')
+    _validate_support_database(staged,'Staged restore')
+   finally:staged.close()
+  finally:source.close()
+
+  if not destination.exists():
+   if _database_signature(destination)!=destination_signature:
+    raise ValueError('Local database sidecars changed while restore was being prepared')
+   if any(os.path.lexists(str(destination)+suffix) for suffix in ('-wal','-shm','-journal')):
+    raise ValueError('Cannot restore into a missing database path with existing SQLite sidecar files')
+   # A hard link is an atomic create-if-absent. If another process creates the
+   # destination during staging, fail instead of replacing its database.
+   os.link(temporary,destination);Path(temporary).unlink();temporary=None
+  else:
+   if destination.is_symlink():raise ValueError('Local database path must not be a symbolic link')
+   if _database_signature(destination)!=destination_signature:
+    raise ValueError('Local database changed while restore was being prepared; retry after stopping other users')
+   target=sqlite3.connect(destination)
+   try:
+    if destination.is_symlink():raise ValueError('Local database path must not be a symbolic link')
+    if _database_signature(destination)!=destination_signature:
+     raise ValueError('Local database changed while restore was being prepared; retry after stopping other users')
+    if destination.stat().st_size:
+     _validate_support_database(target,'Local database')
+    staged=sqlite3.connect(temporary)
+    try:staged.backup(target);_validate_support_database(target,'Restored database')
+    finally:staged.close()
+   finally:target.close()
+   if destination.is_symlink():
+    raise ValueError('Local database path changed to a symbolic link during restore; inspect it before retrying')
+   if destination.stat().st_ino!=destination_signature[0][1]:
+    raise ValueError('Local database path changed during restore; inspect it before retrying')
+   os.chmod(destination,0o600)
+   Path(temporary).unlink();temporary=None
+ except sqlite3.Error as exc:
+  raise ValueError('Could not read or restore the SQLite backup; verify the file and retry') from exc
+ finally:
+  if temporary:
+   try:Path(temporary).unlink()
+   except FileNotFoundError:pass
+
 def load_document(path:Path)->str:
  if path.stat().st_size>10_000_000:raise ValueError('Knowledge file exceeds 10 MB')
  if path.suffix.lower() in {'.md','.txt'}:content=path.read_text(encoding='utf-8')
@@ -133,12 +273,19 @@ def main():
  a=s.add_parser('export');a.add_argument('user');a.add_argument('file',type=Path)
  a=s.add_parser('delete-user');a.add_argument('user');a.add_argument('--confirm',action='store_true')
  a=s.add_parser('health');a.add_argument('--backup',type=Path)
+ a=s.add_parser('restore',help='Restore a verified SQLite backup while the bot is stopped');a.add_argument('backup',type=Path);a.add_argument('--confirm',action='store_true')
  a=s.add_parser('outbox');a.add_argument('actor');a.add_argument('--operator',action='store_true')
  a=s.add_parser('retry-delivery');a.add_argument('actor');a.add_argument('delivery_id',type=int);a.add_argument('--operator',action='store_true');a.add_argument('--confirm',action='store_true')
  a=s.add_parser('purge-closed');a.add_argument('--older-than-days',type=int,required=True);a.add_argument('--confirm',action='store_true')
  a=s.add_parser('eval');a.add_argument('--report',type=Path,default=Path('evaluation-report.json'))
  a=s.add_parser('rag-eval');a.add_argument('--report',type=Path,default=Path('rag-contract-report.json'))
- z=p.parse_args();d=connect(z.db)
+ z=p.parse_args()
+ if z.cmd=='restore':
+  try:restore_database(z.backup,z.db,z.confirm)
+  except (ValueError,OSError) as exc:p.error(str(exc))
+  print(f'Restored and verified local database from {z.backup}')
+  return
+ d=connect(z.db)
  try:
   if z.cmd=='faq-add':
    try:content=load_document(z.file)
@@ -205,7 +352,9 @@ def main():
    result=d.execute('PRAGMA quick_check').fetchone()[0]
    if result!='ok':p.error('SQLite quick_check failed; restore a verified backup before continuing')
    if z.backup:
-    out=sqlite3.connect(z.backup);d.backup(out);out.close();print(f'Backup created: {z.backup}')
+    try:create_backup(d,z.backup)
+    except (ValueError,OSError) as exc:p.error(str(exc))
+    print(f'Backup created: {z.backup}')
    else:print('SQLite quick_check completed')
   elif z.cmd=='outbox':
    require_operator(z.actor,p)
