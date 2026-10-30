@@ -5,14 +5,14 @@
 [![CI](https://github.com/jezannn16/ai-telegram-support-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/jezannn16/ai-telegram-support-bot/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
-**A local FAQ and support-ticket workflow with an optional Telegram front end.** Published Markdown, text, or text-based PDF documents provide source excerpts when they match a question. When evidence is weak, the bot opens a ticket for an operator. The retrieval is lexical and deterministic; despite the project name, it does not call an AI model.
+**A local FAQ and support-ticket workflow with an optional Telegram front end.** Published Markdown, text, or text-based PDF documents provide source excerpts when they match a question. When evidence is weak, the bot opens a ticket for an operator. Retrieval is lexical and deterministic. An opt-in LLM adapter can phrase an answer from retrieved excerpts; it is off by default.
 
 | | |
 |---|---|
 | **Local mode** | FAQ import/search, ticket handling, evaluation, SQLite backup |
 | **Telegram** | Optional polling for customer and operator commands |
 | **Reply delivery** | An operator's `/reply` sends a Telegram message to that ticket's customer |
-| **AI/LLM** | Not implemented |
+| **AI/LLM** | Optional, explicit OpenAI API integration; deterministic mode remains the default |
 
 ## Contents
 
@@ -75,7 +75,23 @@ flowchart LR
     G --> H[Reply stored and sent to customer chat]
 ```
 
-The lexical matcher looks for term overlap in published paragraphs or PDF pages. It excludes draft and retired documents. It does not interpret policy meaning, generate an answer, assess truth, or invoke an LLM. Operator ticket views include a bounded extractive handoff summary of the ticket dialogue and source excerpts; customers never see this internal summary.
+The lexical matcher looks for term overlap in published paragraphs or PDF pages. It excludes draft and retired documents. Retrieval remains lexical even when the optional LLM adapter is enabled. Operator ticket views include a bounded extractive handoff summary of the ticket dialogue and source excerpts; customers never see this internal summary.
+
+### Optional LLM answer adapter
+
+LLM use is disabled unless `SUPPORT_LLM_ENABLED=1` **and** `OPENAI_API_KEY` are both present. With either missing, CLI and Telegram retain the existing deterministic evidence-excerpt flow and make no API request. When enabled, the app sends only the current customer question and up to five excerpts from published documents selected by local retrieval; it does not send ticket history, other customers' data, or tools. Treat this as disclosure to an external API provider and review its current data controls before enabling it.
+
+The model must return the validated JSON structure. Citations are IDs that the server resolves back to retrieved sources; invented IDs, empty citations, malformed responses, or transport errors are never shown as generated answers. Transport/schema failures fall back to the deterministic source excerpts. A model refusal creates an operator handoff ticket with retrieved source context. Prompt-injection attempts in questions and documents are marked as untrusted input, but no prompt can guarantee that a model is immune to injection or unsupported claims; check answers against the displayed citations.
+
+The adapter uses OpenAI's Chat Completions JSON Schema response format, a 20-second request timeout, no tools, and a fixed HTTPS API host. Its default model is `gpt-4o-mini`; `SUPPORT_LLM_MODEL` can select a compatible model. **It may incur API charges when enabled.** No paid request was used for development or tests. See the official [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs) and [Chat Completions API reference](https://developers.openai.com/api/reference/resources/chat).
+
+```sh
+export SUPPORT_LLM_ENABLED=1
+export OPENAI_API_KEY='set-this-in-your-local-shell'
+# Optional model override:
+export SUPPORT_LLM_MODEL='gpt-4o-mini'
+.venv/bin/python app.py --db /tmp/support-demo.sqlite3 ask customer-1 'How long do I have to return an unopened product?'
+```
 
 ## Operator workflow
 
@@ -98,8 +114,9 @@ The CLI stores a reply locally and does not notify the customer. Telegram `/repl
 - Use `purge-closed --older-than-days N --confirm` to enforce a local retention window for closed tickets; open tickets are retained. `export USER FILE` includes tickets, messages, event history, and conversation data. User deletion also clears queued chat responses and legacy update payloads for that user.
 - Bot polling itself sends replies for accepted messages. Do not start it with a production token when testing synthetic cases.
 - The durable outbox uses at-most-once delivery. Inspect it with `outbox OPERATOR_ID --operator`; `retry-delivery OPERATOR_ID ID --operator --confirm` queues only a definite `failed` item for another attempt. An `uncertain` item requires manual inspection because delivery may already have occurred. Attempt counts are persisted.
-- PDF parsing extracts embedded text only. Scanned-document OCR, automated retention, restore drills, rate limiting, webhook mode, hosted deployment, and LLM/RAG are not implemented.
-- The reproducible evaluation has 34 synthetic cases, records each case's allowed document titles, and reports behavior match, retrieval hit rate/recall, and citations matching an allowed source. Unsupported-claim rate stays unscored because the lexical system emits excerpts rather than generated answers; it requires human review if answer generation is added. This is not a benchmark of general support accuracy.
+- PDF parsing extracts embedded text only. Scanned-document OCR, automated retention, restore drills, webhook mode, and hosted deployment are not implemented.
+- The reproducible evaluation has 34 synthetic cases, records each case's allowed document titles, and reports behavior match, retrieval hit rate/recall, and citations matching an allowed source. Unsupported-claim rate stays unscored because this synthetic suite does not grade generated LLM prose; human review remains necessary. This is not a benchmark of general support accuracy.
+- `rag-eval` runs four fake-transport checks for answer schema, allowed-source citations, refusal routing, and malformed output. It never calls an API; this verifies adapter contracts, not model quality or prompt-injection resistance.
 
 ## Development
 
@@ -107,9 +124,10 @@ The CLI stores a reply locally and does not notify the customer. Telegram `/repl
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m unittest discover -v
 .venv/bin/python app.py --db /tmp/support-eval.sqlite3 eval --report /tmp/support-evaluation.json
+.venv/bin/python app.py --db /tmp/support-eval.sqlite3 rag-eval --report /tmp/rag-contract-report.json
 .venv/bin/ruff check .
 ```
 
-CI runs the tests, synthetic evaluation command, and Ruff on Python 3.11 and 3.13 without Telegram credentials. A separate opt-in `getMe` probe checks a real token without sending messages or consuming updates.
+CI runs the tests, synthetic retrieval evaluation, fake-transport RAG contract evaluation, and Ruff on Python 3.11 and 3.13 without Telegram or LLM credentials. A separate opt-in `getMe` probe checks a real Telegram token without sending messages or consuming updates.
 
 See [docs/demo.md](docs/demo.md) for the synthetic FAQ/operator walkthrough and [docs/operator-runbook.md](docs/operator-runbook.md) for delivery recovery and data-handling steps. Use `app.py --help` and `telegram_bot.py --help` for command options.

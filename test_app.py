@@ -2,6 +2,12 @@ import tempfile,unittest,subprocess,sys,json,os
 from pathlib import Path
 import app
 class SupportTests(unittest.TestCase):
+ def test_rag_contract_eval_is_fake_transport_only(self):
+  with tempfile.TemporaryDirectory() as td:
+   report=Path(td)/'rag.json'
+   run=subprocess.run([sys.executable,'app.py','--db',str(Path(td)/'unused.db'),'rag-eval','--report',str(report)],capture_output=True,text=True)
+   self.assertEqual(run.returncode,0,run.stderr);data=json.loads(report.read_text())
+   self.assertEqual(data['n'],4);self.assertEqual(data['passed'],4);self.assertIn('no model/network call',data['method'])
  def test_evaluation_records_allowed_sources_and_retrieval_metrics(self):
   with tempfile.TemporaryDirectory() as td:
    report=Path(td)/'eval.json'

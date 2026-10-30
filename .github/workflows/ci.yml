@@ -28,3 +28,5 @@ jobs:
         run: python -m unittest discover -v
       - name: Evaluate synthetic retrieval cases
         run: python app.py --db "$RUNNER_TEMP/support-eval.sqlite3" eval --report "$RUNNER_TEMP/support-evaluation.json"
+      - name: Evaluate LLM adapter contracts with fake transport
+        run: python app.py --db "$RUNNER_TEMP/support-rag-eval.sqlite3" rag-eval --report "$RUNNER_TEMP/support-rag-eval.json"

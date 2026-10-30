@@ -93,6 +93,19 @@ def handle_update(update,db):
  if not question:return [(chat_id,'Please include a question after /faq.')]
  hits=retrieve(question,db)
  if hits:
+  from llm_adapter import answer_from_hits,configured_transport,render_citations
+  transport=configured_transport()
+  result=answer_from_hits(question,hits,transport) if transport else None
+  if result and result.status=='answered':
+   citations=render_citations(result,hits)
+   answer_lines=[result.answer]
+   answer_lines.extend(f"[{c['document']} v{c['version']} {c['location']}] {c['excerpt'][:500]}" for c in citations)
+   return [(chat_id,'\n\n'.join(answer_lines)[:3900])]
+  if result and result.status=='handoff':
+   citations=[{'document':h[1]['title'],'version':h[1]['version'],'location':h[5],'excerpt':h[3][:500]} for h in hits]
+   tid,created=create_ticket(user,question,citations,db,commit=False)
+   if created:_event(db,user,'ticket.created',tid)
+   return [(chat_id,f"I couldn't safely answer this from the published sources. Ticket #{tid} is open for operator follow-up." if created else f'This request is already tracked in open ticket #{tid}.')]
   lines=['Published knowledge base evidence (review this source excerpt):']
   for h in hits:
    excerpt=h[3][:700];citation=f"[{h[1]['title']} v{h[1]['version']} {h[5]}]"

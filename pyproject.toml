@@ -17,7 +17,7 @@ ai-telegram-support-bot = "app:main"
 support-bot-telegram = "telegram_bot:main"
 
 [tool.setuptools]
-py-modules = ["app", "migrations", "telegram_api", "telegram_runtime", "telegram_bot"]
+py-modules = ["app", "migrations", "telegram_api", "telegram_runtime", "telegram_bot", "llm_adapter"]
 
 [tool.ruff]
 line-length = 100

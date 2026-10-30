@@ -133,6 +133,7 @@ def main():
  a=s.add_parser('retry-delivery');a.add_argument('actor');a.add_argument('delivery_id',type=int);a.add_argument('--operator',action='store_true');a.add_argument('--confirm',action='store_true')
  a=s.add_parser('purge-closed');a.add_argument('--older-than-days',type=int,required=True);a.add_argument('--confirm',action='store_true')
  a=s.add_parser('eval');a.add_argument('--report',type=Path,default=Path('evaluation-report.json'))
+ a=s.add_parser('rag-eval');a.add_argument('--report',type=Path,default=Path('rag-contract-report.json'))
  z=p.parse_args();d=connect(z.db)
  try:
   if z.cmd=='faq-add':
@@ -148,7 +149,17 @@ def main():
    hits=retrieve(z.question,d)
    if hits:
     citations=[{'document':h[1]['title'],'version':h[1]['version'],'location':h[5],'excerpt':h[3][:500]} for h in hits]
-    print('Evidence found (lexical retrieval only):\n'+'\n'.join(f"[{c['document']} v{c['version']} {c['location']}] {c['excerpt']}" for c in citations))
+    from llm_adapter import answer_from_hits,configured_transport,render_citations
+    transport=configured_transport()
+    result=answer_from_hits(z.question,hits,transport) if transport else None
+    if result and result.status=='answered':
+     citations=render_citations(result,hits)
+     print(result.answer+'\n'+'\n'.join(f"[{c['document']} v{c['version']} {c['location']}] {c['excerpt']}" for c in citations))
+    elif result and result.status=='handoff':
+     tid,created=create_ticket(z.user,z.question,citations,d)
+     print(f"The assistant could not safely answer. Ticket #{tid} is open for operator follow-up." if created else f'This request is already tracked in open ticket #{tid}.')
+    else:
+     print('Evidence found (lexical retrieval only):\n'+'\n'.join(f"[{c['document']} v{c['version']} {c['location']}] {c['excerpt']}" for c in citations))
    else:
     tid,created=create_ticket(z.user,z.question,[],d);print(f"I couldn't find enough published evidence. Ticket #{tid} is open for operator follow-up." if created else f'This request is already tracked in open ticket #{tid}.')
   elif z.cmd in ('tickets','ticket','close') and z.operator:require_operator(z.actor,p)
@@ -204,6 +215,10 @@ def main():
   elif z.cmd=='purge-closed':
    if not z.confirm:p.error('Repeat with --confirm to delete closed tickets older than the selected retention period')
    count=purge_closed(d,z.older_than_days);d.commit();print(f'Purged {count} closed ticket(s). Open tickets were retained.')
+  elif z.cmd=='rag-eval':
+   from llm_adapter import contract_evaluation
+   report=contract_evaluation();z.report.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+   print(f"Wrote {report['n']} fake-transport contract checks; {report['passed']} passed. No API call was made.")
   elif z.cmd=='eval':
    # Fixed synthetic cases cover evidence, partial/conflicting sources, stale/draft content and refusal.
    cases=[]
